@@ -5,7 +5,7 @@
   Each run sets the correct theme and reschedules the task for the next transition,
   so nothing keeps running in the background.
 
-  -Install    register the scheduled task (at logon + daily at midnight + at next sunrise/sunset)
+  -Install    copy the script to %LOCALAPPDATA%\CurtainCall and register the scheduled task (at logon + daily at midnight + at next sunrise/sunset)
   -Uninstall  remove the scheduled task
   -Show       only print today's times and the mode that would be set
 
@@ -21,7 +21,9 @@ param(
 )
 
 $TaskName = 'CurtainCall'
-$RegPath  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+$InstallDir = Join-Path $env:LOCALAPPDATA 'CurtainCall'   # copy lives here so the task survives the repo drive unmounting
+$InstalledScript = Join-Path $InstallDir 'curtain-call.ps1'
+$RegPath  ='HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
 
 function Get-SunTimes([datetime]$Date) {
     $rad = [math]::PI / 180
@@ -75,13 +77,14 @@ function Get-WindowsLocation([int]$TimeoutSeconds = 15) {
 }
 
 function Get-TaskAction {
-    $cmd = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Lat $Lat -Lon $Lon"
+    $cmd = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstalledScript`" -Lat $Lat -Lon $Lon"
     New-ScheduledTaskAction -Execute 'conhost.exe' -Argument $cmd
 }
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Host "Task '$TaskName' removed."
+    Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Task '$TaskName' and $InstallDir removed."
     return
 }
 
@@ -123,6 +126,8 @@ $triggers = @(
 )
 
 if ($Install) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    if ($PSCommandPath -ne $InstalledScript) { Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force }
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
