@@ -1,6 +1,6 @@
 # curtain-call
 
-Switches Windows to light mode at sunrise and dark mode at sunset. A single PowerShell script calculates sunrise and sunset locally (NOAA formula, no internet needed) and runs from Task Scheduler. It runs at logon, daily at midnight, and at each sunrise/sunset, and reschedules itself every time it runs. Nothing keeps running in the background.
+Switches Windows to light mode at sunrise and dark mode at sunset. A single PowerShell script calculates sunrise and sunset locally (NOAA formula, no internet needed) and runs from Task Scheduler. It runs at logon, when you unlock the PC, daily at midnight, and at each sunrise/sunset, and reschedules itself every time it runs. Nothing keeps running in the background.
 
 ## Requirements
 

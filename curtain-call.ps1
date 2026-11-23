@@ -5,7 +5,7 @@
   Each run sets the correct theme and reschedules the task for the next transition,
   so nothing keeps running in the background.
 
-  -Install    copy the script to %LOCALAPPDATA%\CurtainCall and register the scheduled task (at logon + daily at midnight + at next sunrise/sunset)
+  -Install    copy the script to %LOCALAPPDATA%\CurtainCall and register the scheduled task (at logon + at unlock + daily at midnight + at next sunrise/sunset)
   -Uninstall  remove the scheduled task
   -Show       only print today's times and the mode that would be set
 
@@ -119,8 +119,13 @@ if ($Show) {
 
 Set-Theme $light
 
+# Unlock trigger: catches up after sleep/Modern Standby, where missed time triggers aren't reliably rerun
+$unlock = New-CimInstance -ClientOnly -CimClass (Get-CimClass -Namespace 'ROOT\Microsoft\Windows\TaskScheduler' `
+          -ClassName MSFT_TaskSessionStateChangeTrigger) -Property @{ StateChange = 8; UserId = $env:USERNAME; Enabled = $true }
+
 $triggers = @(
     New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $unlock
     New-ScheduledTaskTrigger -Daily -At '00:00'           # safety net: restarts the chain daily
     New-ScheduledTaskTrigger -Once -At $nextRun
 )
