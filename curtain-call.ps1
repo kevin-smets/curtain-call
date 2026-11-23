@@ -11,6 +11,8 @@
 
   -Lat/-Lon   your coordinates (east = positive). When omitted, they are read from
               Windows location services; -Install stores them in the task.
+
+  Dot-sourcing the script (. .\curtain-call.ps1) only loads the functions; the tests use this.
 #>
 param(
     [Nullable[double]]$Lat,
@@ -23,9 +25,10 @@ param(
 $TaskName = 'CurtainCall'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'CurtainCall'   # copy lives here so the task survives the repo drive unmounting
 $InstalledScript = Join-Path $InstallDir 'curtain-call.ps1'
-$RegPath  ='HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+$RegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
 
-function Get-SunTimes([datetime]$Date) {
+# Sunrise and sunset in UTC for the given calendar date.
+function Get-SunTimes([datetime]$Date, [double]$Lat, [double]$Lon) {
     $rad = [math]::PI / 180
     $g = 2 * [math]::PI / 365 * ($Date.DayOfYear - 1)
     $eqTime = 229.18 * (0.000075 + 0.001868 * [math]::Cos($g) - 0.032077 * [math]::Sin($g) `
@@ -40,24 +43,48 @@ function Get-SunTimes([datetime]$Date) {
 
     $utcMidnight = [datetime]::SpecifyKind($Date.Date, 'Utc')
     [pscustomobject]@{
-        Sunrise = $utcMidnight.AddMinutes(720 - 4 * ($Lon + $ha) - $eqTime).ToLocalTime()
-        Sunset  = $utcMidnight.AddMinutes(720 - 4 * ($Lon - $ha) - $eqTime).ToLocalTime()
+        Sunrise = $utcMidnight.AddMinutes(720 - 4 * ($Lon + $ha) - $eqTime)
+        Sunset  = $utcMidnight.AddMinutes(720 - 4 * ($Lon - $ha) - $eqTime)
     }
 }
 
+# Which theme applies at $Now, and when the next transition run should happen (local time).
+function Get-ThemeState([datetime]$Now, [double]$Lat, [double]$Lon) {
+    $nowUtc = $Now.ToUniversalTime()
+    $today  = Get-SunTimes $Now $Lat $Lon
+
+    if     ($nowUtc -lt $today.Sunrise) { $next = $today.Sunrise }
+    elseif ($nowUtc -lt $today.Sunset)  { $next = $today.Sunset }
+    else                                { $next = (Get-SunTimes $Now.AddDays(1) $Lat $Lon).Sunrise }
+
+    [pscustomobject]@{
+        Light   = $nowUtc -ge $today.Sunrise -and $nowUtc -lt $today.Sunset
+        Sunrise = $today.Sunrise.ToLocalTime()
+        Sunset  = $today.Sunset.ToLocalTime()
+        NextRun = $next.AddMinutes(1).ToLocalTime()   # small margin so the run lands after the transition
+    }
+}
+
+# Returns $true when the registry was changed, $false when the theme was already right.
 function Set-Theme([bool]$Light) {
     $v = [int]$Light
     $cur = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue
-    if ($cur.AppsUseLightTheme -eq $v -and $cur.SystemUsesLightTheme -eq $v) { return }
+    if ($cur.AppsUseLightTheme -eq $v -and $cur.SystemUsesLightTheme -eq $v) { return $false }
     Set-ItemProperty -Path $RegPath -Name AppsUseLightTheme    -Value $v -Type DWord
     Set-ItemProperty -Path $RegPath -Name SystemUsesLightTheme -Value $v -Type DWord
+    Send-ColorSetChange
+    $true
+}
 
-    # Tell running apps the color setting changed
-    Add-Type -Namespace Win32 -Name Msg -MemberDefinition @'
+# Tell running apps the color setting changed
+function Send-ColorSetChange {
+    if (-not ('Win32.Msg' -as [type])) {
+        Add-Type -Namespace Win32 -Name Msg -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
 public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam,
     string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);
 '@
+    }
     $r = [UIntPtr]::Zero
     [void][Win32.Msg]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'ImmersiveColorSet', 2, 5000, [ref]$r)
 }
@@ -76,10 +103,26 @@ function Get-WindowsLocation([int]$TimeoutSeconds = 15) {
     }
 }
 
-function Get-TaskAction {
-    $cmd = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstalledScript`" -Lat $Lat -Lon $Lon"
+function Get-TaskAction([double]$Lat, [double]$Lon, [string]$ScriptPath = $InstalledScript) {
+    $inv = [Globalization.CultureInfo]::InvariantCulture   # always "50.84", never "50,84"
+    $cmd = '--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Lat {1} -Lon {2}' -f `
+           $ScriptPath, $Lat.ToString($inv), $Lon.ToString($inv)
     New-ScheduledTaskAction -Execute 'conhost.exe' -Argument $cmd
 }
+
+function Get-TaskTriggers([datetime]$NextRun) {
+    # Unlock trigger: catches up after sleep/Modern Standby, where missed time triggers aren't reliably rerun
+    $unlock = New-CimInstance -ClientOnly -CimClass (Get-CimClass -Namespace 'ROOT\Microsoft\Windows\TaskScheduler' `
+              -ClassName MSFT_TaskSessionStateChangeTrigger) -Property @{ StateChange = 8; UserId = $env:USERNAME; Enabled = $true }
+    @(
+        New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $unlock
+        New-ScheduledTaskTrigger -Daily -At '00:00'           # safety net: restarts the chain daily
+        New-ScheduledTaskTrigger -Once -At $NextRun
+    )
+}
+
+if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced: functions only
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -100,35 +143,19 @@ if ($null -eq $Lat -or $null -eq $Lon) {
     Write-Host "Location from Windows: $Lat, $Lon"
 }
 
-$now   = Get-Date
-$today = Get-SunTimes $now
-$light = $now -ge $today.Sunrise -and $now -lt $today.Sunset
-
-if     ($now -lt $today.Sunrise) { $next = $today.Sunrise }
-elseif ($now -lt $today.Sunset)  { $next = $today.Sunset }
-else                             { $next = (Get-SunTimes $now.AddDays(1)).Sunrise }
-$nextRun = $next.AddMinutes(1)   # small margin so the run lands after the transition
+$state = Get-ThemeState (Get-Date) $Lat $Lon
+$mode  = if ($state.Light) { 'light' } else { 'dark' }
 
 if ($Show) {
-    "Sunrise : {0:HH:mm}" -f $today.Sunrise
-    "Sunset  : {0:HH:mm}" -f $today.Sunset
-    "Now     : {0}" -f ($(if ($light) { 'light' } else { 'dark' }))
-    "Next    : {0:ddd HH:mm}" -f $nextRun
+    "Sunrise : {0:HH:mm}" -f $state.Sunrise
+    "Sunset  : {0:HH:mm}" -f $state.Sunset
+    "Now     : $mode"
+    "Next    : {0:ddd HH:mm}" -f $state.NextRun
     return
 }
 
-Set-Theme $light
-
-# Unlock trigger: catches up after sleep/Modern Standby, where missed time triggers aren't reliably rerun
-$unlock = New-CimInstance -ClientOnly -CimClass (Get-CimClass -Namespace 'ROOT\Microsoft\Windows\TaskScheduler' `
-          -ClassName MSFT_TaskSessionStateChangeTrigger) -Property @{ StateChange = 8; UserId = $env:USERNAME; Enabled = $true }
-
-$triggers = @(
-    New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $unlock
-    New-ScheduledTaskTrigger -Daily -At '00:00'           # safety net: restarts the chain daily
-    New-ScheduledTaskTrigger -Once -At $nextRun
-)
+[void](Set-Theme $state.Light)
+$triggers = Get-TaskTriggers $state.NextRun
 
 if ($Install) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -136,9 +163,9 @@ if ($Install) {
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $TaskName -Action (Get-TaskAction) -Trigger $triggers `
+    Register-ScheduledTask -TaskName $TaskName -Action (Get-TaskAction $Lat $Lon) -Trigger $triggers `
         -Settings $settings -Principal $principal -Force | Out-Null
-    Write-Host ("Installed. Theme now {0}, next switch {1:ddd HH:mm}." -f $(if ($light) { 'light' } else { 'dark' }), $nextRun)
+    Write-Host ("Installed. Theme now {0}, next switch {1:ddd HH:mm}." -f $mode, $state.NextRun)
 } else {
     Set-ScheduledTask -TaskName $TaskName -Trigger $triggers -ErrorAction SilentlyContinue | Out-Null
 }

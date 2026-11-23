@@ -7,6 +7,7 @@ Switches Windows to light mode at sunrise and dark mode at sunset. A single Powe
 - Windows 11 (uses `conhost --headless` to run without a visible window)
 - Windows PowerShell 5.1 (built in)
 - No admin rights needed
+- For the tests only: Pester 5 or newer (`Install-Module Pester -Scope CurrentUser -SkipPublisherCheck`)
 
 ## Commands
 
@@ -32,6 +33,12 @@ Remove the scheduled task:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File .\curtain-call.ps1 -Uninstall
+```
+
+Run the tests (they change nothing on your system):
+
+```
+powershell -NoProfile -Command "Invoke-Pester -Path .\tests -Output Detailed"
 ```
 
 `-Install` copies the script to `%LOCALAPPDATA%\CurtainCall` and the task runs that copy, so it keeps working if the folder or drive with the repo is gone. After changing the script, run `-Install` again to update the copy. `-Uninstall` removes both the task and the copy.
